@@ -1,0 +1,186 @@
+#include <TinyGPS++.h>
+#include <SPI.h>
+#include <RFM69.h>
+#include <Wire.h>
+
+
+#define NODEID      99
+#define NETWORKID   100
+#define GATEWAYID   1
+#define FREQUENCY   RF69_868MHZ //Match this with the version of your Moteino! (others: RF69_433MHZ, RF69_868MHZ)
+#define KEY         "thisIsEncryptKey" //has to be same 16 characters/bytes on all nodes, not more not less!
+#define LED         9
+#define ACK_TIME    30  // # of ms to wait for an ack
+
+byte sendSize=0;
+boolean requestACK = false;
+
+TinyGPSPlus gps;
+RFM69 radio;
+
+unsigned int calibrationData[7];
+double av_flat, av_flon, av_pressure, av_fspeed;
+double flat, flon, falt, fspeed;
+int GPS=0, compt1=0, compt2=0;
+unsigned long time_start, age, update = 0;
+
+typedef struct
+{
+   float flat;
+   float flon;
+   float pressure;
+   float fspeed;
+   int GPS;
+   int Correction = 0;
+} data_radio;
+
+  data_radio data;
+
+void setup()
+{
+  Wire.begin();
+  setupSensor();
+  Serial.begin(115200);
+  //Serial.begin(115200);
+  radio.initialize(FREQUENCY,NODEID,NETWORKID);
+  radio.setHighPower(); //uncomment only for RFM69HW!
+  radio.setPowerLevel(18);
+  radio.encrypt(KEY);
+  pinMode(5, INPUT);
+  pinMode(9, OUTPUT);
+  digitalWrite(9,HIGH);
+  delay(200);
+  digitalWrite(9,LOW);
+  delay(200);
+  digitalWrite(9,HIGH);
+  delay(200);
+  digitalWrite(9,LOW);
+  delay(200);
+  digitalWrite(9,HIGH);
+  delay(200);
+  digitalWrite(9,LOW); 
+}
+
+
+void loop()
+{
+
+while ( Serial.available() > 0 )
+{
+time_start = millis(); 
+
+    int c = Serial.read();
+    if (gps.encode(c))
+    {
+      if ( gps.location.isValid() )  
+       {
+           data.flat = gps.location.lat();
+           data.flon = gps.location.lng();
+           data.fspeed = gps.speed.kmph();
+           data.pressure = getPressure();
+           data.GPS = 1;
+           radio.send(GATEWAYID, (const void*)(&data), sizeof(data));
+           update = millis();
+    } else {
+           data.flat = 0;
+           data.flon = 0;
+           data.pressure = getPressure();
+           data.GPS = 0; 
+           radio.send(GATEWAYID, (const void*)(&data), sizeof(data));
+           update = millis(); 
+        }
+    } else {
+    
+      if ( (millis() - update) > 1000 ) {
+           data.flat = 0;
+           data.flon = 0;
+           data.pressure = getPressure();
+           data.GPS = 0; 
+           radio.send(GATEWAYID, (const void*)(&data), sizeof(data));
+           update = millis(); 
+           }
+      
+    }
+    
+if ( digitalRead(5) ) {
+data.Correction = 1; 
+} else {
+data.Correction = 0; 
+}
+
+}
+
+
+}
+
+long getPressure()
+{
+  long D1, D2, dT, P;
+  float TEMP;
+  int64_t OFF, SENS;
+ 
+  D1 = getData(0x48, 10);
+  D2 = getData(0x50, 1);
+
+  dT = D2 - ((long)calibrationData[5] << 8);
+  TEMP = (2000 + (((int64_t)dT * (int64_t)calibrationData[6]) >> 23)) / (float)100;
+  OFF = ((unsigned long)calibrationData[2] << 16) + (((int64_t)calibrationData[4] * dT) >> 7);
+  SENS = ((unsigned long)calibrationData[1] << 15) + (((int64_t)calibrationData[3] * dT) >> 8);
+  P = (((D1 * SENS) >> 21) - OFF) >> 15;
+  
+  //Serial.println(TEMP);
+  //Serial.println(P);
+  
+  return P;
+}
+
+
+long getData(byte command, byte del)
+{
+  long result = 0;
+  twiSendCommand(0x77, command);
+  delay(del);
+  twiSendCommand(0x77, 0x00);
+  Wire.requestFrom(0x77, 3);
+  if(Wire.available()!=3);// Serial.println("Error: raw data not available");
+  for (int i = 0; i <= 2; i++)
+  {
+    result = (result<<8) | Wire.read(); 
+  }
+  return result;
+}
+
+
+void setupSensor()
+{
+  twiSendCommand(0x77, 0x1e);
+  delay(100);
+  
+  for (byte i = 1; i <=6; i++)
+  {
+    unsigned int low, high;
+
+    twiSendCommand(0x77, 0xa0 + i * 2);
+    Wire.requestFrom(0x77, 2);
+    if(Wire.available()!=2);// Serial.println("Error: calibration data not available");
+    high = Wire.read();
+    low = Wire.read();
+    calibrationData[i] = high<<8 | low;
+    //Serial.print("calibration data #");
+    //Serial.print(i);
+    //Serial.print(" = ");
+    //Serial.println( calibrationData[i] ); 
+  }
+}
+
+
+void twiSendCommand(byte address, byte command)
+{
+  Wire.beginTransmission(address);
+  if (!Wire.write(command));// Serial.println("Error: write()");
+  if (Wire.endTransmission()) 
+  {
+    //Serial.print("Error when sending command: ");
+    //Serial.println(command, HEX);
+  }
+}
